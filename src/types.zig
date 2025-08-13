@@ -489,8 +489,8 @@ pub fn MaybeBatch(comptime T: type) type {
 
         pub fn get(self: Self, index: usize) ?*const T {
             return switch (self) {
-                .single => |*item| if (index == 0) item else null,
-                .batch => |batch| if (index < batch.items.len) &batch.items[index] else null,
+                .single => |*item| if (index == 0) item.* else null,
+                .batch => |batch| if (index < batch.items.len) batch.items[index] else null,
             };
         }
 
@@ -775,7 +775,9 @@ test "MaybeBatch.fromSlice - batch requests" {
     ;
 
     var maybe_batch = try MaybeBatch(RequestObject).fromSlice(allocator, json_str);
-    defer maybe_batch.deinit(allocator);
+    defer {
+        maybe_batch.deinit(allocator);
+    }
 
     switch (maybe_batch) {
         .batch => |batch| {
