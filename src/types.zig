@@ -427,6 +427,124 @@ pub const ResponseObject = union(enum) {
     }
 };
 
+pub fn MaybeBatch(comptime T: type) type {
+    comptime {
+        if (!isJsonRpcObject(T)) {
+            @compileError("MaybeBatch only accepts RequestObject or ResponseObject types with required methods");
+        }
+    }
+
+    return union(enum) {
+        single: *T,
+        batch: std.ArrayList(*T),
+
+        const Self = @This();
+
+        pub fn fromSlice(allocator: Allocator, slice: []const u8) !Self {
+            var lines = std.mem.splitSequence(u8, slice, "\n");
+            var items = std.ArrayList(*T).init(allocator);
+            errdefer {
+                for (items.items) |*item| {
+                    if (@hasDecl(T, "deinit")) {
+                        item.*.deinit(allocator);
+                    }
+                }
+                items.deinit();
+            }
+
+            while (lines.next()) |line| {
+                const item = try T.fromSlice(allocator, line);
+                try items.append(item);
+            }
+
+            if (items.items.len == 0) {
+                items.deinit();
+                return error.EmptyInput;
+            } else if (items.items.len == 1) {
+                const single_item = items.items[0];
+                items.deinit();
+                return Self{ .single = single_item };
+            } else {
+                return Self{ .batch = items };
+            }
+        }
+
+        pub fn deinit(self: *Self, parent_alloc: Allocator) void {
+            switch (self.*) {
+                .single => |*item| {
+                    if (@hasDecl(T, "deinit")) {
+                        item.*.deinit(parent_alloc);
+                    }
+                },
+                .batch => |*batch| {
+                    for (batch.items) |*item| {
+                        if (@hasDecl(T, "deinit")) {
+                            item.*.deinit(parent_alloc);
+                        }
+                    }
+                    batch.deinit();
+                },
+            }
+        }
+
+        pub fn get(self: Self, index: usize) ?*const T {
+            return switch (self) {
+                .single => |*item| if (index == 0) item else null,
+                .batch => |batch| if (index < batch.items.len) &batch.items[index] else null,
+            };
+        }
+
+        pub fn len(self: Self) usize {
+            switch (self) {
+                .single => return 1,
+                .batch => |items| return items.items.len,
+            }
+        }
+
+        pub fn iterator(self: *const Self) Iterator {
+            return Iterator{
+                .maybe_batch = self,
+                .index = 0,
+            };
+        }
+
+        pub const Iterator = struct {
+            maybe_batch: *const Self,
+            index: usize,
+
+            pub fn next(self: *Iterator) ?*const T {
+                defer self.index += 1;
+                return self.maybe_batch.get(self.index);
+            }
+        };
+    };
+}
+
+/// MaybeBatch only accepts RequstObject or ResponseObject
+fn isJsonRpcObject(comptime T: type) bool {
+    if (!@hasDecl(T, "fromSlice")) return false;
+    if (!@hasDecl(T, "deinit")) return false;
+
+    const fromSlice = @field(T, "fromSlice");
+    const fromSlice_info = @typeInfo(@TypeOf(fromSlice));
+    if (fromSlice_info != .@"fn") return false;
+
+    const type_info = @typeInfo(T);
+    switch (type_info) {
+        .@"struct" => {
+            // RequestObject
+            if (@hasField(T, "jsonrpc") and @hasField(T, "method")) return true;
+        },
+        .@"union" => {
+            // ResponseObject
+            if (@hasField(T, "ok") or @hasField(T, "err")) return true;
+        },
+        else => return false,
+    }
+
+    return false;
+}
+
 test "RequestObject.fromSlice" {
     const allocator = testing.allocator;
 
@@ -627,4 +745,45 @@ test "ResponseObject.toJson - error response" {
     const actual = try response.toJson();
 
     try testing.expectEqualStrings(expected, actual);
+}
+
+test "MaybeBatch.fromSlice - single request" {
+    const allocator = testing.allocator;
+
+    const json_str =
+        \\{"jsonrpc": "2.0", "method": "subtract", "params": [42, 23], "id": 1}
+    ;
+
+    var maybe_batch = try MaybeBatch(RequestObject).fromSlice(allocator, json_str);
+    defer maybe_batch.deinit(allocator);
+
+    switch (maybe_batch) {
+        .single => |request| {
+            try testing.expectEqualStrings("subtract", request.method);
+        },
+        .batch => try testing.expect(false),
+    }
+}
+
+test "MaybeBatch.fromSlice - batch requests" {
+    const allocator = testing.allocator;
+
+    const json_str =
+        \\{"jsonrpc": "2.0", "method": "sum", "params": [1,2,4], "id": "1"}
+        \\{"jsonrpc": "2.0", "method": "notify_hello", "params": [7]}
+        \\{"jsonrpc": "2.0", "method": "get_data", "id": "9"}
+    ;
+
+    var maybe_batch = try MaybeBatch(RequestObject).fromSlice(allocator, json_str);
+    defer maybe_batch.deinit(allocator);
+
+    switch (maybe_batch) {
+        .batch => |batch| {
+            try testing.expectEqual(@as(usize, 3), batch.items.len);
+            try testing.expectEqualStrings("sum", batch.items[0].method);
+            try testing.expectEqualStrings("notify_hello", batch.items[1].method);
+            try testing.expectEqualStrings("get_data", batch.items[2].method);
+        },
+        .single => try testing.expect(false),
+    }
 }
