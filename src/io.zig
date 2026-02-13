@@ -1,11 +1,24 @@
 const std = @import("std");
 const posix = std.posix;
 
+/// A stream wrapper for sending and receiving JSON-RPC messages over TCP.
+///
+/// Message format:
+/// ```
+/// [4-byte little-endian length prefix][JSON payload]
+/// ```
+/// Transparently handles TCP packet fragmentation and reassembly
+/// using an internal bufrfer.
 pub const JsonStream = struct {
+    /// Read buffer
     buf: []u8,
+    /// Start position of unprocessed data
     start: usize = 0,
+    /// End position of data written into the buffer.
     pos: usize = 0,
 
+    /// Initializes a `JsonStream` with the given buffer.
+    /// Ownership of the buffer remains with the caller.
     pub fn init(buf: []u8) JsonStream {
         return .{
             .buf = buf,
@@ -14,6 +27,10 @@ pub const JsonStream = struct {
         };
     }
 
+    /// Reads a single complete JSON message from the socket.
+    /// The caller is responsible for parsing the returned bytes into either a
+    /// JSON-RPC `RequestObject` or `ResponseObject` depending on the context
+    /// (e.g. server-side expects requests, client-side expects responses).
     pub fn readMessage(self: *JsonStream, socket: posix.socket_t) ![]u8 {
         var buf = self.buf;
         while (true) {
@@ -69,6 +86,8 @@ pub const JsonStream = struct {
         self.pos = unprocessed.len;
     }
 
+    /// Sends a JSON message to the socket.
+    /// Prepends a 4-byte little-endian length prefix before the payload.
     pub fn writeMessage(self: *JsonStream, msg: []const u8, socket: posix.socket_t) !void {
         _ = self;
         var buf: [4]u8 = undefined;

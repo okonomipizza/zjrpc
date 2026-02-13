@@ -4,14 +4,19 @@ const Allocator = std.mem.Allocator;
 const JsonStream = @import("io.zig").JsonStream;
 const RequestObject = @import("types.zig").RequestObject;
 const ResponseObject = @import("types.zig").ResponseObject;
-const MaybeBatch = @import("types.zig").MaybeBatch;
 
+/// A JSON-RPC client that communicates over TCP.
+///
+/// Each `call` or `cast` opens a new TCP connection, sends a request.
+/// and closes the connection when done.
 pub const RpcClient = struct {
     address: std.net.Address,
     stream: JsonStream,
     buf: []u8,
     allocator: Allocator,
 
+    /// Initializes an `RpcClient` with an internal read buffer of `buf_size` bytes.
+    /// The client connects to `address` on each `call` or `cast`.
     pub fn init(allocator: Allocator, buf_size: usize, address: std.net.Address) !RpcClient {
         const buf: []u8 = try allocator.alloc(u8, buf_size);
         const stream = JsonStream.init(buf);
@@ -24,6 +29,7 @@ pub const RpcClient = struct {
         };
     }
 
+    /// Releases the internal read buffer.
     pub fn deinit(self: RpcClient) void {
         self.allocator.free(self.buf);
     }
@@ -36,62 +42,32 @@ pub const RpcClient = struct {
         return socket;
     }
 
-    pub fn call(self: *RpcClient, allocator: Allocator, request: MaybeBatch(RequestObject)) !*MaybeBatch(ResponseObject) {
+    /// Sends a JSON-RPC request and waits for a response.
+    pub fn call(self: *RpcClient, allocator: Allocator, request: *RequestObject) !*ResponseObject {
         const socket = try self.bind();
         defer std.posix.close(socket);
 
-        const response = try allocator.create(MaybeBatch(ResponseObject));
-        errdefer allocator.destroy(response);
-
-        switch (request) {
-            .single => |single| {
-                const request_json = try single.toJson();
-
-                try self.stream.writeMessage(request_json, socket);
-                const response_json = try self.stream.readMessage(socket);
-
-                response.* = try MaybeBatch(ResponseObject).fromSlice(allocator, response_json);
-
-                return response;
-            },
-            .batch => |batch| {
-                if (batch.items.len == 0) return error.EmptyBatchRequests;
-
-                var combined_requests = std.ArrayList(u8).init(allocator);
-                defer combined_requests.deinit();
-
-                for (batch.items, 0..) |req, i| {
-                    const request_json = try req.toJson();
-
-                    if (i > 0) try combined_requests.append('\n');
-                    try combined_requests.appendSlice(request_json);
-                }
-
-                const final_request = try combined_requests.toOwnedSlice();
-                defer allocator.free(final_request);
-
-                try self.stream.writeMessage(final_request, socket);
-                const response_json = try self.stream.readMessage(socket);
-
-                response.* = try MaybeBatch(ResponseObject).fromSlice(allocator, response_json);
-
-                return response;
-            },
-        }
-
-        // const request_json = try request.toJson();
-        // try self.stream.writeMessage(request_json, socket);
-        // const response = try self.stream.readMessage(socket);
-
-        // return response;
+        try self.sendRequest(socket, request);
+        return self.receiveResponse(allocator, socket);
     }
 
+    fn sendRequest(self: *RpcClient, socket: posix.socket_t, request: *RequestObject) !void {
+        const json_slice = try request.toJson();
+        try self.stream.writeMessage(json_slice, socket);
+    }
+
+    fn receiveResponse(self: *RpcClient, allocator: Allocator, socket: posix.socket_t) !*ResponseObject {
+        const response_json = try self.stream.readMessage(socket);
+        return try ResponseObject.fromSlice(allocator, response_json);
+    }
+
+    /// Sends a JSON-RPC request without waiting for a response.
+    ///
+    /// Suitable for JSON-RPC notification where no response is expected.
     pub fn cast(self: *RpcClient, request: *RequestObject) !void {
         const socket = try self.bind();
         defer std.posix.close(socket);
 
-        const request_json = try request.toJson();
-
-        try self.stream.writeMessage(request_json, socket);
+        try self.sendRequest(socket, request);
     }
 };
