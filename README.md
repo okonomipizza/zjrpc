@@ -5,7 +5,7 @@ A minimal JSON-RPC 2.0 over TCP library for Zig.
 Messages are framed with a 4-byte little-endian length prefix followed by a JSON payload.
 
 ```
-[4-byte LE length][JSON payload]
+[4-byte length][JSON payload]
 ```
 
 ### Request-Response (`call`)
